@@ -10,9 +10,6 @@ from utils.tools import get_batch_mask, get_prompt_text
 from utils.ucf_detectionMAP import getDetectionMAP as dmAP
 import ucf_option
 
-import sys
-
-
 def refine_scores_hierarchical(logits_mlp: torch.Tensor,
                                logits_align: torch.Tensor,
                                temp: float = 5.0) -> torch.Tensor:
@@ -33,9 +30,16 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, D
     model.eval()
 
     element_logits2_stack = []
+    coarse_video_scores = []
+    alignment_video_scores = []
+    abnormal_scores = []
+    abnormal_gt = []
+    abnormal_videos = 0
+    gt = np.asarray(gt).reshape(-1)
+    gt_offset = 0
 
     with torch.no_grad():
-        for i, item in enumerate(testdataloader):
+        for item in testdataloader:
             visual = item[0].squeeze(0)
             length = item[2]
 
@@ -68,41 +72,68 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, D
             logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
 
             optimized_probs = refine_scores_hierarchical(logits1[0:len_cur], logits2[0:len_cur], args.temp)
-            prob2 = 1 - optimized_probs[:, 0]
-            prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
-
-            if i == 0:
-                ap1 = prob1
-                ap2 = prob2
-            else:
-                ap1 = torch.cat([ap1, prob1], dim=0)
-                ap2 = torch.cat([ap2, prob2], dim=0)
+            coarse_scores = torch.sigmoid(logits1[:len_cur].squeeze(-1))
+            alignment_scores = 1 - F.softmax(logits2[:len_cur], dim=-1)[:, 0]
+            coarse_frame_scores = np.repeat(coarse_scores.cpu().numpy(), 16)
+            gt_video = gt[gt_offset:gt_offset + len(coarse_frame_scores)]
+            if len(gt_video) != len(coarse_frame_scores):
+                raise ValueError(f"Prediction/GT length mismatch for video {item[3][0]}")
+            gt_offset += len(coarse_frame_scores)
+            coarse_video_scores.append(coarse_frame_scores)
+            alignment_video_scores.append(np.repeat(alignment_scores.cpu().numpy(), 16))
+            if item[4][0] != "Normal":
+                abnormal_videos += 1
+                abnormal_scores.append(coarse_frame_scores)
+                abnormal_gt.append(gt_video)
 
             element_logits2 = optimized_probs.detach().cpu().numpy()
             element_logits2 = np.repeat(element_logits2, 16, 0)
             element_logits2_stack.append(element_logits2)
 
-    ap1 = ap1.cpu().numpy()
-    ap1 = ap1.tolist()
-    ap2 = ap2.cpu().numpy()
-    ap2 = ap2.tolist()
+    if gt_offset != len(gt):
+        raise ValueError(f"Per-video frame scores cover {gt_offset} frames, but ground truth has {len(gt)} frames.")
+    if not abnormal_gt:
+        raise ValueError("No abnormal videos were found in the evaluation set.")
+    abnormal_gt = np.concatenate(abnormal_gt)
+    abnormal_scores = np.concatenate(abnormal_scores)
+    if not np.all(np.isin(abnormal_gt, (0, 1))):
+        raise ValueError("Abnormal-video ground truth must contain only 0 and 1.")
+    abnormal_frames = int(np.count_nonzero(abnormal_gt))
+    normal_frames = len(abnormal_gt) - abnormal_frames
+    if not abnormal_frames or not normal_frames:
+        raise ValueError("Abnormal-video ground truth must contain both normal and abnormal frames to calculate Ano-AUC.")
 
-    ROC1 = roc_auc_score(gt, np.repeat(ap1, 16))
-    AP1 = average_precision_score(gt, np.repeat(ap1, 16))
-    ROC2 = roc_auc_score(gt, np.repeat(ap2, 16))
-    AP2 = average_precision_score(gt, np.repeat(ap2, 16))
-
-    print("AUC1: ", ROC1, " AP1: ", AP1, flush=True)
-    print("AUC2: ", ROC2, " AP2:", AP2, flush=True)
-    sys.stdout.flush()
-
+    coarse_frame_scores = np.concatenate(coarse_video_scores)
+    alignment_frame_scores = np.concatenate(alignment_video_scores)
+    ROC1 = roc_auc_score(gt, coarse_frame_scores)
+    AP1 = average_precision_score(gt, coarse_frame_scores)
+    alignment_auc = roc_auc_score(gt, alignment_frame_scores)
+    alignment_ap = average_precision_score(gt, alignment_frame_scores)
+    ano_auc = roc_auc_score(abnormal_gt, abnormal_scores)
+    ano_ap = average_precision_score(abnormal_gt, abnormal_scores)
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
-    averageMAP = 0
-    for i in range(5):
-        print('mAP@{0:.1f} ={1:.2f}%'.format(iou[i], dmap[i]))
-        averageMAP += dmap[i]
-    averageMAP = averageMAP/(i+1)
-    print('average MAP: {:.2f}'.format(averageMAP))
+    print("=" * 60)
+    print("UCF-Crime Evaluation")
+    print("=" * 60)
+    print("[Paper / checkpoint metric]")
+    print(f"{'AUC':<31}: {ROC1 * 100:.2f}%")
+    print("\n[Fine-grained anomaly detection]")
+    for threshold, score in zip(iou, dmap):
+        print(f'{f"mAP@{threshold:.1f}":<31}: {score:.2f}%')
+    print(f"{'Average mAP':<31}: {np.mean(dmap):.2f}%")
+    print("\n[Additional research metrics]")
+    print(f"{'Ano-AUC (abnormal videos only)':<31}: {ano_auc * 100:.2f}%")
+    print(f"{'Ano-AP  (abnormal videos only)':<31}: {ano_ap * 100:.2f}%")
+    print("\n[Auxiliary branch diagnostics]")
+    print(f"{'C-branch AUC':<31}: {ROC1 * 100:.2f}%")
+    print(f"{'C-branch AP':<31}: {AP1 * 100:.2f}%")
+    print(f"{'A-branch AUC':<31}: {alignment_auc * 100:.2f}%")
+    print(f"{'A-branch AP':<31}: {alignment_ap * 100:.2f}%")
+    print("=" * 60)
+    print(f"UCF abnormal-only evaluation: abnormal_videos={abnormal_videos}, "
+          f"frames={len(abnormal_gt)}, abnormal_frames={abnormal_frames}, "
+          f"normal_frames={normal_frames}")
+    print("=" * 60, flush=True)
 
     return ROC1, AP1
 
