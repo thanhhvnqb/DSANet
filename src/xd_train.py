@@ -166,7 +166,7 @@ def train(model, train_loader, test_loader, args, label_map: dict, device):
     epoch = 0
 
     if args.use_checkpoint == True:
-        checkpoint = torch.load(args.checkpoint_path)
+        checkpoint = torch.load(args.checkpoint_path, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer_main.load_state_dict(checkpoint['optimizer_state_dict'])
         epoch = checkpoint['epoch']
@@ -258,13 +258,13 @@ def train(model, train_loader, test_loader, args, label_map: dict, device):
                 'epoch': e,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer_main.state_dict(),
-                'ap': ap_best}
+                'ap': float(ap_best)}
             torch.save(checkpoint, args.checkpoint_path)
 
-        checkpoint = torch.load(args.checkpoint_path)
+        checkpoint = torch.load(args.checkpoint_path, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
 
-    checkpoint = torch.load(args.checkpoint_path)
+    checkpoint = torch.load(args.checkpoint_path, weights_only=True)
     torch.save(checkpoint['model_state_dict'], args.model_path)
 
 def setup_seed(seed):
