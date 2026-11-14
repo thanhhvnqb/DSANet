@@ -16,6 +16,8 @@ Learning to Tell Apart: Weakly Supervised Video Anomaly Detection via Disentangl
   </a>
 </p>
 
+
+
 </div>
 
 > [!NOTE]
@@ -29,6 +31,11 @@ Therefore, we propose a novel Disentangled Semantic Alignment Network (DSANet) t
 Specifically, at the coarse-grained level, we introduce a self-guided normality modeling branch that reconstructs input video features under the guidance of learned normal prototypes, encouraging the model to exploit normality cues inherent in the video, thereby improving the temporal separation of normal patterns and anomalous events.
 At the fine-grained level, we present a decoupled contrastive semantic alignment mechanism, which first temporally decomposes each video into event-centric and background-centric components using frame-level anomaly scores and then applies visual-language contrastive learning to enhance class-discriminative representations.
 Comprehensive experiments on two standard benchmarks, namely XD-Violence and UCF-Crime, demonstrate that DSANet outperforms existing state-of-the-art methods.
+f
+f
+dsa
+fsda
+fsa
 
 <div align="center">
   <img src="assets/framework.png" width="100%" alt="Framework of DSANet"/>
