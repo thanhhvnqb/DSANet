@@ -1,3 +1,5 @@
+from pathlib import Path
+from utils.run_paths import prepare_run
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -10,6 +12,7 @@ from ucf_test import test
 from utils.dataset import UCFDataset
 from utils.tools import get_prompt_text, get_batch_label
 from utils.StableAdamW import StableAdamW
+from utils.training_log import TrainingLog
 import ucf_option
 
 import sys
@@ -166,8 +169,21 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     )
 
     prompt_text = get_prompt_text(label_map)
+    training_log = TrainingLog(
+        "ucf",
+        args,
+        device,
+        selection_metric="frame_level_roc_auc",
+        validation_schedule={
+            "type": "within_epoch",
+            "trigger": "(zero_based_batch_index * combined_batch_size) % 1280 == 0",
+            "exclude_batch_index": 0,
+            "indexing_offset": "The existing trigger uses zero-based batch indices; no epoch-end evaluation is added.",
+        },
+    )
     ap_best = 0
     epoch = 0
+    global_step = 0
 
     if args.use_checkpoint == True:
         checkpoint = torch.load(args.checkpoint_path, weights_only=True)
@@ -181,10 +197,17 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     for e in range(args.max_epoch):
         DNP_use = args.DNP_use
         model.train()
-        loss_total1 = 0
-        loss_total2 = 0
-        loss_total4 = 0
-        loss_total5 = 0
+        loss_totals = {
+            "total": 0.0,
+            "loss1": 0.0,
+            "loss2": 0.0,
+            "loss3": 0.0,
+            "loss4": 0.0,
+            "loss5": 0.0,
+            "consistency_loss": 0.0,
+            "g_loss": 0.0,
+        }
+        batches = 0
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
         for i in range(min(len(normal_loader), len(anomaly_loader))):
@@ -203,10 +226,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 text_features, logits1, logits2, logits3, logits4 = model(visual_features, None, prompt_text, feat_lengths, DNP_use)
             #loss1
             loss1 = CLAS2(logits1, text_labels, feat_lengths, device) 
-            loss_total1 += loss1.item()
             #loss2
             loss2 = CLASM(logits2, text_labels, feat_lengths, device)
-            loss_total2 += loss2.item()
  
             if DNP_use == True:
                 consistency_loss = consistency_loss_fn(
@@ -216,13 +237,14 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     lengths=feat_lengths
                 )
                 g_loss = DNP['g_loss']
+            else:
+                consistency_loss = None
+                g_loss = None
             
             #loss4
             loss4 = CLASM_EVENT(logits3, text_labels, feat_lengths, device)
-            loss_total4 += loss4.item()
             #loss5
             loss5 = CLASM_BKG(logits4, text_labels, feat_lengths, device)
-            loss_total5 += loss5.item()
             #loss3
             loss3 = torch.zeros(1).to(device)
             text_feature_normal = text_features[0] / text_features[0].norm(dim=-1, keepdim=True)
@@ -242,28 +264,62 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             optimizer_refiner.step()
             scheduler_refiner.step()
             step += i * normal_loader.batch_size * 2
+            global_step += 1
+            batches += 1
+            batch_losses = {
+                "total": float(loss.item()),
+                "loss1": float(loss1.item()),
+                "loss2": float(loss2.item()),
+                "loss3": float(loss3.item()),
+                "loss4": float(loss4.item()),
+                "loss5": float(loss5.item()),
+                "consistency_loss": float(consistency_loss.item()) if consistency_loss is not None else None,
+                "g_loss": float(g_loss.item()) if g_loss is not None else None,
+            }
+            for name, value in batch_losses.items():
+                if value is not None:
+                    loss_totals[name] += value
+
             if step % 1280 == 0 and step != 0:
+                averaged_losses = {
+                    name: value / batches
+                    for name, value in loss_totals.items()
+                    if name not in ("consistency_loss", "g_loss") or DNP_use
+                }
                 log_items = [
                     f"epoch: {e+1}",
                     f"step: {step}",
-                    f"loss1: {loss_total1 / (i+1):.4f}",
-                    f"loss2: {loss_total2 / (i+1):.4f}",
-                    f"loss3: {loss3.item():.4f}",
-                    f"loss4: {loss_total4 / (i+1):.4f}",
-                    f"loss5: {loss_total5 / (i+1):.4f}",
+                    f"loss1: {averaged_losses['loss1']:.4f}",
+                    f"loss2: {averaged_losses['loss2']:.4f}",
+                    f"loss3: {batch_losses['loss3']:.4f}",
+                    f"loss4: {averaged_losses['loss4']:.4f}",
+                    f"loss5: {averaged_losses['loss5']:.4f}",
                 ]
                 if DNP_use:
-                    log_items.append(f"consistency_loss: {consistency_loss.item():.4f}")
-                    log_items.append(f"g_loss: {g_loss.item():.4f}")
+                    log_items.append(f"consistency_loss: {batch_losses['consistency_loss']:.4f}")
+                    log_items.append(f"g_loss: {batch_losses['g_loss']:.4f}")
                 
                 print(" | ".join(log_items), flush=True)
                 sys.stdout.flush()
-                AUC, AP = test(model, testloader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, DNP_use, device, args)
+                training_log.record_training_interval(
+                    epoch=e + 1,
+                    batch_index=i,
+                    global_step=global_step,
+                    protocol_step=step,
+                    averaged_losses=averaged_losses,
+                    batch_losses=batch_losses,
+                    learning_rates={
+                        "main": optimizer_main.param_groups[0]["lr"],
+                        "refiner": optimizer_refiner.param_groups[0]["lr"],
+                    },
+                )
+                AUC, AP, validation_metrics = test(
+                    model, testloader, args.visual_length, prompt_text, gt, gtsegments,
+                    gtlabels, DNP_use, device, args, return_details=True,
+                )
                 AP = AUC
-
-                model.train()
-
-                if AP > ap_best:
+                checkpoint_selected = AP > ap_best
+                if checkpoint_selected:
                     ap_best = AP 
                     checkpoint = {
                         'epoch': e,
@@ -271,15 +327,43 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                         'optimizer_state_dict': optimizer_main.state_dict(),
                         'ap': float(ap_best)}
                     torch.save(checkpoint, args.checkpoint_path)
+                    torch.save(checkpoint['model_state_dict'], args.model_path)
+                training_log.record_validation(
+                    epoch=e + 1,
+                    batch_index=i,
+                    global_step=global_step,
+                    selection_value=float(AUC),
+                    metrics=validation_metrics,
+                    checkpoint_selected=checkpoint_selected,
+                    checkpoint_path=args.checkpoint_path,
+                )
+
+                model.train()
                 
+        epoch_learning_rates = {
+            "main": optimizer_main.param_groups[0]["lr"],
+            "refiner": optimizer_refiner.param_groups[0]["lr"],
+        }
         scheduler_main.step()
+        mean_losses = {
+            name: value / batches if batches else None
+            for name, value in loss_totals.items()
+            if name not in ("consistency_loss", "g_loss") or DNP_use
+        }
+        training_log.record_epoch(
+            epoch=e + 1,
+            batches=batches,
+            mean_losses=mean_losses,
+            learning_rates=epoch_learning_rates,
+        )
         
-        torch.save(model.state_dict(), 'model/model_cur.pth')
+        torch.save(model.state_dict(), str(Path(args.run_dir) / 'last_model.pth'))
         checkpoint = torch.load(args.checkpoint_path, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
 
     checkpoint = torch.load(args.checkpoint_path, weights_only=True)
     torch.save(checkpoint['model_state_dict'], args.model_path)
+    training_log.finish()
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -291,6 +375,7 @@ def setup_seed(seed):
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = ucf_option.parser.parse_args()
+    prepare_run(args, "ucf", training=True)
     setup_seed(args.seed)
 
     label_map = dict({'Normal': 'normal', 'Abuse': 'abuse', 'Arrest': 'arrest', 'Arson': 'arson', 'Assault': 'assault', 'Burglary': 'burglary', 'Explosion': 'explosion', 'Fighting': 'fighting', 'RoadAccidents': 'roadAccidents', 'Robbery': 'robbery', 'Shooting': 'shooting', 'Shoplifting': 'shoplifting', 'Stealing': 'stealing', 'Vandalism': 'vandalism'})

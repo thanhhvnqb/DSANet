@@ -1,3 +1,4 @@
+from utils.run_paths import prepare_run
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -9,6 +10,7 @@ from model import DSANet
 from utils.dataset import XDDataset
 from utils.tools import get_batch_mask, get_prompt_text
 from utils.xd_detectionMAP import getDetectionMAP as dmAP
+from utils.training_log import save_evaluation_log
 import xd_option
 
 def refine_scores_hierarchical(logits_mlp: torch.Tensor,
@@ -30,7 +32,7 @@ def refine_scores_hierarchical(logits_mlp: torch.Tensor,
 
     return final_probabilities
 
-def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, DNP_use, args, device):
+def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, DNP_use, args, device, return_details=False):
     
     model.to(device)
     model.eval()
@@ -141,12 +143,34 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, D
           f"normal_frames={normal_frames}")
     print("=" * 60, flush=True)
 
+    metrics = {
+        "frame_level_roc_auc": float(ROC1),
+        "frame_level_average_precision": float(AP1),
+        "alignment_frame_level_roc_auc": float(alignment_auc),
+        "alignment_frame_level_average_precision": float(alignment_ap),
+        "abnormal_video_frame_roc_auc": float(ano_auc),
+        "abnormal_video_frame_average_precision": float(ano_ap),
+        "fine_grained_map": {
+            f"iou_{threshold:.1f}": float(score)
+            for threshold, score in zip(iou, dmap)
+        },
+        "average_fine_grained_map": float(np.mean(dmap)),
+        "counts": {
+            "abnormal_videos": int(abnormal_videos),
+            "abnormal_video_frames": int(len(abnormal_gt)),
+            "abnormal_frames": int(abnormal_frames),
+            "normal_frames": int(normal_frames),
+        },
+    }
+    if return_details:
+        return ROC1, AP1, 0, metrics
     return ROC1, AP1, 0#, averageMAP
 
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = xd_option.parser.parse_args()
+    prepare_run(args, "xd", training=False)
 
     label_map = dict({'A': 'normal', 'B1': 'fighting', 'B2': 'shooting', 'B4': 'riot', 'B5': 'abuse', 'B6': 'car accident', 'G': 'explosion'})
 
@@ -162,4 +186,16 @@ if __name__ == '__main__':
     model_param = torch.load(args.model_path)
     model.load_state_dict(model_param)
 
-    test(model, test_loader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, args.DNP_use, args, device)
+    _, _, _, metrics = test(
+        model, test_loader, args.visual_length, prompt_text, gt, gtsegments,
+        gtlabels, args.DNP_use, args, device, return_details=True,
+    )
+    log_path = save_evaluation_log(
+        "xd",
+        args,
+        device,
+        selection_metric="frame_level_average_precision",
+        selection_value=metrics["frame_level_average_precision"],
+        metrics=metrics,
+    )
+    print(f"Evaluation JSON saved to {log_path}")

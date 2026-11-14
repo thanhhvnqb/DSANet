@@ -1,3 +1,4 @@
+from utils.run_paths import prepare_run
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -8,6 +9,7 @@ from model import DSANet
 from utils.dataset import UCFDataset
 from utils.tools import get_batch_mask, get_prompt_text
 from utils.ucf_detectionMAP import getDetectionMAP as dmAP
+from utils.training_log import save_evaluation_log
 import ucf_option
 
 def refine_scores_hierarchical(logits_mlp: torch.Tensor,
@@ -24,7 +26,7 @@ def refine_scores_hierarchical(logits_mlp: torch.Tensor,
     final_probabilities = torch.cat([total_normal_prob, final_abnormal_probs], dim=1)
     return final_probabilities
 
-def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, DNP_use, device, args):
+def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, DNP_use, device, args, return_details=False):
     
     model.to(device)
     model.eval()
@@ -135,14 +137,36 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, D
           f"normal_frames={normal_frames}")
     print("=" * 60, flush=True)
 
+    metrics = {
+        "frame_level_roc_auc": float(ROC1),
+        "frame_level_average_precision": float(AP1),
+        "alignment_frame_level_roc_auc": float(alignment_auc),
+        "alignment_frame_level_average_precision": float(alignment_ap),
+        "abnormal_video_frame_roc_auc": float(ano_auc),
+        "abnormal_video_frame_average_precision": float(ano_ap),
+        "fine_grained_map": {
+            f"iou_{threshold:.1f}": float(score)
+            for threshold, score in zip(iou, dmap)
+        },
+        "average_fine_grained_map": float(np.mean(dmap)),
+        "counts": {
+            "abnormal_videos": int(abnormal_videos),
+            "abnormal_video_frames": int(len(abnormal_gt)),
+            "abnormal_frames": int(abnormal_frames),
+            "normal_frames": int(normal_frames),
+        },
+    }
+    if return_details:
+        return ROC1, AP1, metrics
     return ROC1, AP1
 
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = ucf_option.parser.parse_args()
+    prepare_run(args, "ucf", training=False)
 
-    label_map = dict({'Normal': 'Normal', 'Abuse': 'Abuse', 'Arrest': 'Arrest', 'Arson': 'Arson', 'Assault': 'Assault', 'Burglary': 'Burglary', 'Explosion': 'Explosion', 'Fighting': 'Fighting', 'RoadAccidents': 'RoadAccidents', 'Robbery': 'Robbery', 'Shooting': 'Shooting', 'Shoplifting': 'Shoplifting', 'Stealing': 'Stealing', 'Vandalism': 'Vandalism'})
+    label_map = dict({'Normal': 'normal', 'Abuse': 'abuse', 'Arrest': 'arrest', 'Arson': 'arson', 'Assault': 'assault', 'Burglary': 'burglary', 'Explosion': 'explosion', 'Fighting': 'fighting', 'RoadAccidents': 'roadAccidents', 'Robbery': 'robbery', 'Shooting': 'shooting', 'Shoplifting': 'shoplifting', 'Stealing': 'stealing', 'Vandalism': 'vandalism'})
 
     testdataset = UCFDataset(args.visual_length, args.test_list, True, label_map)
     testdataloader = DataLoader(testdataset, batch_size=1, shuffle=False)
@@ -156,4 +180,16 @@ if __name__ == '__main__':
     model_param = torch.load(args.model_path)
     model.load_state_dict(model_param)
 
-    test(model, testdataloader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, args.DNP_use, device, args)
+    _, _, metrics = test(
+        model, testdataloader, args.visual_length, prompt_text, gt, gtsegments,
+        gtlabels, args.DNP_use, device, args, return_details=True,
+    )
+    log_path = save_evaluation_log(
+        "ucf",
+        args,
+        device,
+        selection_metric="frame_level_roc_auc",
+        selection_value=metrics["frame_level_roc_auc"],
+        metrics=metrics,
+    )
+    print(f"Evaluation JSON saved to {log_path}")

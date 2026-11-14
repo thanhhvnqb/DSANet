@@ -17,7 +17,7 @@ class UCFDataset(data.Dataset):
         elif test_mode == False:
             self.df = self.df.loc[self.df['label'] != 'Normal']
             self.df = self.df.reset_index()
-        
+
     def __len__(self):
         return self.df.shape[0]
 
@@ -43,7 +43,7 @@ class XDDataset(data.Dataset):
         self.clip_dim = clip_dim
         self.test_mode = test_mode
         self.label_map = label_map
-        
+
     def __len__(self):
         return self.df.shape[0]
 

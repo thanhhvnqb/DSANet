@@ -1,6 +1,8 @@
 import argparse
+from utils.run_paths import add_run_arguments
 
 parser = argparse.ArgumentParser(description='DSANet')
+add_run_arguments(parser)
 parser.add_argument('--seed', default=234, type=int)
 
 parser.add_argument('--embed-dim', default=512, type=int)
@@ -14,9 +16,11 @@ parser.add_argument('--prompt-postfix', default=10, type=int)
 parser.add_argument('--classes-num', default=14, type=int)
 
 parser.add_argument('--max-epoch', default=10, type=int)
-parser.add_argument('--model-path', default='model/model_ucf.pth')
+parser.add_argument('--log-path', default=None, help='JSON training log path (defaults to a unique file under runs/).')
+parser.add_argument('--test-log-path', default=None, help='JSON evaluation log path (defaults to a unique file under runs/).')
+parser.add_argument('--model-path', default=None)
 parser.add_argument('--use-checkpoint', default=False, type=bool)
-parser.add_argument('--checkpoint-path', default='model/checkpoint.pth')
+parser.add_argument('--checkpoint-path', default=None)
 parser.add_argument('--batch-size', default=64, type=int)
 parser.add_argument('--train-list', default='list/ucf_CLIP_rgb.csv')
 parser.add_argument('--test-list', default='list/ucf_CLIP_rgbtest.csv')

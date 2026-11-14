@@ -64,29 +64,79 @@ To train the model on a specific dataset, ensure you have updated the feature pa
 
 **UCF-Crime:**
 ```bash
-python ucf_train.py
+python src/ucf_train.py
 ```
 
 **XD-Violence:**
 ```bash
-python xd_train.py
+python src/xd_train.py
 ```
+
+Training checkpoints are loaded with `weights_only=True`. Newly saved
+checkpoints store the selection metric as a Python float. Older checkpoints
+containing a NumPy scalar may still fail restricted loading; converting them
+requires loading with `weights_only=False`, which can execute arbitrary code.
+Only do so for a checkpoint from a trusted source.
+
+New training and test outputs use
+`runs/<hypothesis>/<variant>/<dataset>/seed_<seed>/` (defaults: `baseline`,
+`DSANet`, seed `234`). Each directory contains unique timestamped training/test
+JSON logs, `best_checkpoint.pth` (training state), and `best_model.pth`
+(inference weights). UCF also saves `last_model.pth`. Best weights are saved
+immediately whenever the selection metric improves. Existing model artifacts
+are protected from accidental fresh-run overwrites; choose a new variant for a
+repeat run. Explicit output paths must remain inside the run directory.
+Standalone testing accepts `--model-path` to evaluate external weights.
+`--use-checkpoint True` explicitly resumes from the run checkpoint using the
+existing training resume behavior; exact scheduler/RNG continuation is not
+implemented. Logs retain configuration, environment, Git metadata, training
+losses, validation events, and selected-checkpoint metrics. Selection uses the
+test split and must be disclosed in reports.
+
+Run from the repository root (commands are provided for user execution):
+
+```bash
+rtk proxy .venv/bin/python src/ucf_train.py --hypothesis baseline --variant DSANet --seed 234
+rtk proxy .venv/bin/python src/ucf_test.py --hypothesis baseline --variant DSANet --seed 234
+rtk proxy .venv/bin/python src/xd_train.py --hypothesis baseline --variant DSANet --seed 234
+rtk proxy .venv/bin/python src/xd_test.py --hypothesis baseline --variant DSANet --seed 234
+```
+
+Historical artifacts retain their previous paths. The implementation in this
+repository trains DSANet; naming a variant `VadCLIP` does not change the model.
+VadCLIP logs are imported baseline evidence, and its separate implementation
+is outside this repository's training entry points.
+
+See [the performance report](reports/performance_report.md) for original-paper
+and reproduced results, branch definitions, and evaluation limitations.
+
 ## 🧪 Testing
 
 We provide the pre-trained model weights to reproduce our results.
 
 1. **Download Weights:** Download the `.pth` files from [Google Drive](https://drive.google.com/drive/folders/1PqvaNm_s-fOOrnJRqrG50zV2R2UqRwHK?usp=sharing).
-2. **Placement:** Place the downloaded weights into the `model/` folder.
+2. **Placement:** Place downloaded weights in a chosen location and pass `--model-path model/model_ucf.pth` or `--model-path model/model_xd.pth`. Without this option, testing loads the selected run directory’s `best_model.pth`.
 
 **Evaluate on UCF-Crime:**
 ```bash
-python ucf_test.py
+python src/ucf_test.py
 ```
 
 **Evaluate on XD-Violence:**
 ```bash
-python xd_test.py
+python src/xd_test.py
 ```
+
+Validation prints the checkpoint-selection metric (UCF frame-level ROC-AUC or
+XD frame-level AP), fine-grained mAP at IoU 0.1–0.5, abnormal-video-only
+ROC-AUC and AP, and branch diagnostics. In this implementation, the C-branch
+is the binary anomaly detector (`sigmoid(logits1)`), and the A-branch is the
+vision-language alignment score (`1 - softmax(logits2)[normal]`). The
+checkpoint metric and abnormal-only metrics use the C-branch; fine-grained
+mAP retains the existing temperature-scaled hierarchical probabilities.
+Scores are repeated 16 times to map snippets to frames. Model selection uses
+the test set, so these results are test-selected, not an unbiased held-out test
+estimate.
 
 ## 📊 Results
 
